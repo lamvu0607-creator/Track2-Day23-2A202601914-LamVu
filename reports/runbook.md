@@ -1,17 +1,26 @@
-# Runbook 1 trang — Region chính down (TEMPLATE, sinh viên điền)
+# One-Page Runbook - Primary Region Down
 
-Runbook phải chạy được lúc 3h sáng bởi người KHÔNG viết nó. Mỗi bước: lệnh copy-paste
-được + cách biết bước đó xong.
+Operational guide for Region A outage containment and failover to Region B. Executable by on-call engineers at 3 AM.
 
-| # | Bước | Lệnh | Biết là xong khi | Ai làm |
+| # | Step | Command | Completion Signal | Owner |
 |---|---|---|---|---|
-| 1 | Xác nhận outage | `python chaos/kill_region.py status` | `a.alive=false` 3 lần liên tiếp | on-call |
-| 2 | Mở incident + bấm giờ RTO | | ts ghi vào `reports/runbook-run.jsonl` | on-call |
-| 3 | Restore state ở region phụ | `python state/snapshot.py get --region b --backend fs` | | |
-| 4 | Scale pool warm→full | | `/readyz` của b trả 200 | |
-| 5 | DNS/LB cutover | | `curl localhost:8080/edge/state` cho `active_region=b` | |
-| 6 | Verify golden signals | | p95 < ___ms, error rate < ___ | |
-| 7 | Đo RTO + postmortem | `python tools/measure_rto.py --loadgen reports/drill-2-withdr.jsonl` | `rto_verdict` != null | |
+| 1 | Confirm Outage | `python chaos/kill_region.py status` | `a.alive=false` or `a.ready=false` for 3 consecutive probes | On-call SRE |
+| 2 | Open Incident + Start RTO Clock | `python dr/runbook.py --primary a --target b --backend fs --auto` | Line `step:2, name:thong_bao_incident` logged in `reports/runbook-run.jsonl` | Incident Commander |
+| 3 | Restore State in Secondary Region | `python state/snapshot.py get --region b --backend fs` | Files `state/region-b/vectors.sqlite` and `state/region-b/weights/model.bin` exist | SRE Automation |
+| 4 | Scale Pool warm to full | `echo full > state/region-b/pool_state && curl localhost:8002/readyz` | `/readyz` on Region B returns HTTP 200 `{"status":"ready"}` | SRE Automation |
+| 5 | DNS / Load Balancer Cutover | `echo b > edge/active_region && curl localhost:8080/edge/state` | Edge proxy returns `{"active_region":"b"}` | SRE Automation |
+| 6 | Verify Golden Signals | `python -c "import httpx; [print(httpx.get('http://127.0.0.1:8080/v1/infer', timeout=3).status_code) for _ in range(10)]"` | 10 consecutive requests return 200, p95 latency < 100ms, error rate = 0% | On-call SRE |
+| 7 | Measure RTO + Postmortem | `python tools/measure_rto.py --loadgen reports/drill-2-withdr.jsonl --target-rto 300` | Output returns `"valid":true`, `"rto_verdict":"PASS"`, RTO <= 300s | Incident Commander |
 
-**Rollback (failover ngược):** điều kiện nào thì trả traffic về region A? Ai quyết định?
-(§4 Anti-Patterns: full-auto không có circuit breaker → 2 region flap qua lại.)
+---
+
+### Rollback Policy (Failback to Region A)
+
+**Prerequisites for Rollback:**
+1. Region A has been fully restored and `/healthz` + `/readyz` remain stable and healthy for at least 15 continuous minutes.
+2. New data ingested into Region B during failover has been reverse-replicated back to Region A (`state/snapshot.py put --region b` and `state/snapshot.py get --region a`).
+3. System traffic is in off-peak hours with no active network anomalies.
+
+**Decision Authority:**
+- Rollback execution must be explicitly authorized by the **Incident Commander** or **Lead SRE**.
+- Automatic rollback without human verification or circuit breaker is strictly prohibited to prevent continuous flapping between regions.

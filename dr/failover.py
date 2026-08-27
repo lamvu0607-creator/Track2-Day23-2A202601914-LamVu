@@ -25,6 +25,12 @@ import pathlib
 import sys
 import time
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 import httpx
 
 sys.path.insert(0, ".")
@@ -35,13 +41,105 @@ LOG = pathlib.Path("reports/failover-events.jsonl")
 
 
 def emit(**kw):
-    """TODO: append 1 dòng JSONL có ts + iso vào LOG, và print ra stdout."""
-    raise NotImplementedError
+    """Append 1 dòng JSONL có ts + iso vào LOG, và print ra stdout."""
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"ts": time.time(), "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()), **kw}
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+    print("FAILOVER", json.dumps(rec))
+    return rec
 
 
-def failover(target: str, backend: str, wait: float) -> dict:
-    """TODO: 5 bước ở trên, đúng thứ tự."""
-    raise NotImplementedError
+def state_of(region: str) -> dict:
+    """Lấy trạng thái hiện tại của region."""
+    try:
+        r = httpx.get(f"{URL[region]}/v1/state", timeout=2.0)
+        return r.json()
+    except Exception as e:
+        d = pathlib.Path(f"state/region-{region}")
+        ps = (d / "pool_state").read_text().strip() if (d / "pool_state").exists() else "unknown"
+        w = (d / "weights" / "model.bin").exists()
+        return {"region": region, "pool_state": ps, "weights": w, "error": str(e)}
+
+
+def failover(target: str, backend: str, wait: float = 60.0) -> dict:
+    """5 bước failover đúng thứ tự."""
+    primary = "a" if target == "b" else "b"
+
+    # Bước 1: 1_verify_target
+    target_state = state_of(target)
+    emit(step="1_verify_target", target=target, target_state=target_state)
+
+    # Bước 2: 2_restore_snapshot
+    meta = snapshot.get(target, backend)
+    rpo_info = snapshot.rpo(
+        pathlib.Path(f"state/region-{primary}/vectors.sqlite"),
+        pathlib.Path(f"state/region-{target}/vectors.sqlite"),
+    )
+    rpo_seconds = rpo_info.get("rpo_seconds")
+    docs_lost = rpo_info.get("docs_lost")
+    embed_model_version = meta.get("embed_model_version")
+    emit(
+        step="2_restore_snapshot",
+        target=target,
+        rpo_seconds=rpo_seconds,
+        docs_lost=docs_lost,
+        embed_model_version=embed_model_version,
+        meta=meta,
+    )
+
+    # Bước 3: 3_scale_pool
+    pool_file = pathlib.Path(f"state/region-{target}/pool_state")
+    pool_file.parent.mkdir(parents=True, exist_ok=True)
+    pool_file.write_text("full\n")
+    emit(step="3_scale_pool", target=target, pool_state="full")
+
+    # Bước 4: 4_wait_ready
+    t_start = time.time()
+    ready = False
+    waited_s = 0.0
+    while time.time() - t_start < wait:
+        try:
+            r = httpx.get(f"{URL[target]}/readyz", timeout=1.5)
+            if r.status_code == 200:
+                ready = True
+                waited_s = round(time.time() - t_start, 2)
+                emit(step="4_wait_ready", target=target, ready=True, waited_s=waited_s)
+                break
+        except Exception:
+            pass
+        time.sleep(0.2)
+
+    if not ready:
+        emit(
+            step="4_wait_ready",
+            target=target,
+            ready=False,
+            error="timeout_waiting_ready",
+            waited_s=round(time.time() - t_start, 2),
+        )
+        return {
+            "ok": False,
+            "target": target,
+            "error": "timeout_waiting_ready",
+            "waited_s": round(time.time() - t_start, 2),
+        }
+
+    # Bước 5: 5_dns_cutover
+    active_region_file = pathlib.Path("edge/active_region")
+    active_region_file.parent.mkdir(parents=True, exist_ok=True)
+    active_region_file.write_text(target)
+    emit(step="5_dns_cutover", target=target, active_region=target)
+
+    return {
+        "ok": True,
+        "target": target,
+        "rpo_seconds": rpo_seconds,
+        "docs_lost": docs_lost,
+        "embed_model_version": embed_model_version,
+        "waited_s": waited_s,
+        "active_region": target,
+    }
 
 
 if __name__ == "__main__":

@@ -1,40 +1,39 @@
-# RTO/RPO Evidence — Lab 23 (TEMPLATE — sinh viên điền bằng SỐ CỦA MÌNH)
+# RTO/RPO Evidence - Lab 23
 
-Quy tắc duy nhất: mỗi con số ở đây phải trỏ được về **một dòng log thật**
-(`đường/dẫn.jsonl:số_dòng`). `pytest tests/test_rto_evidence.py` sẽ mở từng file ra kiểm tra.
-Con số không có evidence = trượt, bất kể các phần khác.
+Report on measured RTO and RPO from multi-region DR event logs.
 
-## 1. Drill 1 — không có DR (baseline)
+## 1. Drill 1 - Baseline (No DR)
 
-| Chỉ số | Giá trị | Cách đo | Evidence |
+| Metric | Value | Measurement | Evidence |
 |---|---|---|---|
-| t_outage | `<iso>` | chaos kill | `chaos/chaos-events.jsonl:1` |
-| Request fail đầu tiên | `+__s` | dòng `ok:false` đầu tiên sau t_outage | `reports/drill-1-nodr.jsonl:__` |
-| Request thành công sau đó | không có | không có dòng `ok:true` nào sau t_outage | `reports/measure-drill-1.json` |
-| RTO | `NO_RECOVERY` | `tools/measure_rto.py` | `reports/measure-drill-1.json` |
+| t_outage | `2026-08-27T02:22:03` | chaos kill | `chaos/chaos-events.jsonl:1` |
+| First failed request | `+0.0s` | first `ok:false` line after t_outage | `reports/drill-1-nodr.jsonl:17` |
+| Subsequent successful request | none | no `ok:true` line after t_outage | `reports/measure-drill-1.json:10` |
+| RTO | `NO_RECOVERY` | `tools/measure_rto.py` | `reports/measure-drill-1.json:25` |
 
-## 2. Drill 2 — có DR
+## 2. Drill 2 - With DR
 
-| Mốc | +giây từ t_outage | Cách đo | Evidence |
+| Milestone | +seconds from t_outage | Measurement | Evidence |
 |---|---|---|---|
-| t_outage (mốc 0) | 0 | `action:kill` | `chaos/chaos-events.jsonl:__` |
-| User thấy lỗi đầu tiên | | dòng `ok:false` đầu | `reports/drill-2-withdr.jsonl:__` |
-| Health check phát hiện | | `to:UNHEALTHY, region:a` | `reports/health-events.jsonl:__` |
-| Snapshot restore xong | | `step:2_restore_snapshot` | `reports/failover-events.jsonl:__` |
-| Region phụ ready | | `step:4_wait_ready` | `reports/failover-events.jsonl:__` |
-| DNS cutover | | `step:5_dns_cutover` | `reports/failover-events.jsonl:__` |
-| **RTO đo được** | | dòng `ok:true` đầu sau lỗi | `reports/drill-2-withdr.jsonl:__` |
+| t_outage (point 0) | 0.0s | `action:kill` | `chaos/chaos-events.jsonl:2` |
+| User sees first error | 0.5s | first `ok:false` line | `reports/drill-2-withdr.jsonl:26` |
+| Health check detection | 14.8s | `to:UNHEALTHY, region:a` | `reports/health-events.jsonl:2` |
+| Snapshot restore complete | 17.6s | `step:2_restore_snapshot` | `reports/failover-events.jsonl:2` |
+| Target region ready | 23.8s | `step:4_wait_ready` | `reports/failover-events.jsonl:4` |
+| DNS cutover | 23.8s | `step:5_dns_cutover` | `reports/failover-events.jsonl:5` |
+| **Measured RTO** | 29.0s | first `ok:true` line served by region b | `reports/drill-2-withdr.jsonl:40` |
 
-| Chỉ số | Đo được | Mục tiêu (slide §1) | Verdict |
+| Metric | Measured | Target (Slide 1) | Verdict |
 |---|---|---|---|
-| RTO — Inference API | `__s` | 300s (5 phút) | |
-| RPO — Vector DB | `__s` / `__` doc | 300s (5 phút) | |
+| RTO - Inference API | `29.0s` | 300.0s (5 min) | PASS |
+| RPO - Vector DB | `2.0s` / `1` doc | 300.0s (5 min) | PASS |
 
-## 3. RTO của tôi gồm những gì (bắt buộc — đây là phần chấm điểm hiểu bài)
+## 3. RTO Component Breakdown
 
-| Thành phần | Giây | Nó đến từ đâu | Giảm được bằng cách nào |
+| Component | Seconds | Source | Mitigation / Optimization |
 |---|---|---|---|
-| Health-check detect floor | | `interval_s × threshold` trong `reports/health-events.jsonl:__` | |
-| Snapshot restore | | 2_restore → 3_scale | |
-| GPU pool warm-up | | `waited_s` ở `4_wait_ready` | |
-| DNS/LB TTL cache | | t_recovered − t_cutover | |
+| Health-check detect floor | 15.0s | `interval_s * threshold` (5s * 3) in `reports/health-events.jsonl:2` | Reduce interval (e.g. 2s) or threshold (e.g. 2), trade-off: increased flapping risk during transient network jitter |
+| Snapshot restore | 0.1s | 2_restore to 3_scale in `reports/failover-events.jsonl:2` | Optimize storage I/O, incremental snapshot replication |
+| GPU pool warm-up | 6.2s | `waited_s` in `4_wait_ready` in `reports/failover-events.jsonl:4` | Maintain pre-warmed standby pool with weights preloaded in memory |
+| DNS/LB TTL cache | 5.2s | t_recovered (29.0s) - t_cutover (23.8s) in `reports/drill-2-withdr.jsonl:40` | Lower proxy / DNS TTL from 5s to 1s |
+| Runbook dispatch overhead | 2.5s | Operator notification delay and dispatch in `reports/runbook-run.jsonl:2` | Full automation with automated circuit-breaker |
